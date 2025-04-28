@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crda-app
+  namespace: crda-namespace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crda-app
+  template:
+    metadata:
+      labels:
+        app: crda-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3002"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: crda-app
+        image: najwa22/crda-app:latest
+        ports:
+        - containerPort: 3002
+        env:
+        - name: PORT
+          value: "3002"
+        - name: MYSQL_HOST
+          value: "mysql-service"
+        - name: MYSQL_USER
+          value: "app_user"
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: app-password
+        - name: MYSQL_DB
+          value: "base_crda"
+          
+        - name: DB_HOST
+          value: "mysql-service"
+        - name: DB_USER
+          value: "app_user"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: app-password
+        - name: DB_NAME
+          value: "base_crda"
+
+        - name: SESSION_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: app-secret
+              key: session-secret
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: app-secret
+              key: jwt-secret
+        - name: NODE_ENV
+          value: "production"
+        readinessProbe:
+          httpGet:
+            path: /health-pod
+            port: 3002
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          failureThreshold: 10
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: 3002
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 5

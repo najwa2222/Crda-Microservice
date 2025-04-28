@@ -1,0 +1,40 @@
+{
+  "name": "crda-app",
+  "version": "1.0.0",
+  "main": "app.js",
+  "type": "module",
+  "scripts": {
+    "start": "nodemon app.js",
+    "dev": "tailwindcss -i ./public/css/tailwind.css -o ./public/css/styles.css --config tailwind.config.cjs",
+    "build": "tailwindcss -i ./public/css/tailwind.css -o ./public/css/styles.css --minify --config tailwind.config.cjs",
+    "lint": "eslint . --config eslint.config.js",
+    "lint:fix": "eslint . --fix --config eslint.config.js",
+    "sonar": "sonar-scanner",
+    "test:empty": "echo 'Generating empty coverage' && mkdir -p coverage && echo '{}' > coverage/lcov.info",
+    "test": "cross-env NODE_OPTIONS=--experimental-vm-modules JEST_JUNIT_CONFIG=jest-junit.config.cjs JEST_JUNIT_OUTPUT_DIR=./reports JEST_JUNIT_OUTPUT_NAME=junit.xml jest --forceExit --ci --coverage --reporters=default --reporters=jest-junit",
+    "test:watch": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --watch",
+    "test:coverage": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --coverage"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "express-mysql-session": "^3.0.3",
+    "express-session": "^1.18.1",
+    "helmet": "^8.1.0",
+    "method-override": "^3.0.0",
+    "mysql2": "^3.14.1"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.1",
+    "eslint-config-standard": "^17.1.0",
+    "eslint-plugin-import": "^2.31.0",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-promise": "^7.2.1",
+    "nodemon": "^3.1.10"
+  }
+}

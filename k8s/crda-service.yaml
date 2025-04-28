@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: crda-app-service
+  namespace: crda-namespace
+spec:
+  selector:
+    app: crda-app
+  ports:
+  - port: 3002
+    targetPort: 3002
+  type: ClusterIP

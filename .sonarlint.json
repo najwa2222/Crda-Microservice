@@ -1,0 +1,12 @@
+{
+    "serverId": "sonarqube",
+    "projectKey": "najwa22_crda-app",
+    "exclusions": {
+      "pathPatterns": [
+        "**/node_modules/**",
+        "**/test/**",
+        "**/coverage/**",
+        "**/kubernetes/**"
+      ]
+    }
+  }
