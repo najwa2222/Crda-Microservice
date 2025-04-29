@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="jest tests" tests="1" failures="0" errors="0" time="3.004">
-  <testsuite name="Health Check" errors="0" failures="0" skipped="0" timestamp="2025-04-29T01:07:07" time="2.845" tests="1">
-    <testcase classname="Health Check should return 200 OK for /health" name="Health Check should return 200 OK for /health" time="0.196">
+<testsuites name="jest tests" tests="1" failures="0" errors="0" time="3.194">
+  <testsuite name="Health Check" errors="0" failures="0" skipped="0" timestamp="2025-04-29T22:25:48" time="3.008" tests="1">
+    <testcase classname="Health Check should return 200 OK for /health" name="Health Check should return 200 OK for /health" time="0.297">
     </testcase>
   </testsuite>
 </testsuites>

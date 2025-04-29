@@ -36,19 +36,6 @@ spec:
               key: app-password
         - name: MYSQL_DB
           value: "base_crda"
-          
-        - name: DB_HOST
-          value: "mysql-service"
-        - name: DB_USER
-          value: "app_user"
-        - name: DB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mysql-secret
-              key: app-password
-        - name: DB_NAME
-          value: "base_crda"
-
         - name: SESSION_SECRET
           valueFrom:
             secretKeyRef:
