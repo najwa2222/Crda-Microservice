@@ -238,7 +238,7 @@ async function initDatabase() {
       console.error(`❌ Database connection failed (${retries} retries):`, err.message);
       retries--;
       if (retries === 0) {
-        console.error('❌ Maximum retries reached. Exiting application.');
+        console.error('❌ Maximum retries reached. Exiting application..');
         process.exit(1);
       }
       await new Promise(res => setTimeout(res, 5000));
