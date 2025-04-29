@@ -62,8 +62,29 @@ const DB_CONFIG = {
 const pool = mysql.createPool(DB_CONFIG);
 
 // Session configuration
+// Session configuration with proper database specification
 const MySQLStore = MySQLStoreFactory(session);
-const sessionStore = new MySQLStore(DB_CONFIG);
+if (!process.env.MYSQL_DATABASE) {
+  console.error('❌ MYSQL_DATABASE environment variable is required');
+  process.exit(1);
+}
+const sessionOptions = {
+  host: process.env.MYSQL_HOST,
+  user: process.env.MYSQL_USER,
+  password: process.env.MYSQL_PASSWORD,
+  database: process.env.MYSQL_DATABASE,
+  port: process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : 3306,
+  createDatabaseTable: true,
+  schema: {
+    tableName: 'sessions',
+    columnNames: {
+      session_id: 'session_id',
+      expires: 'expires',
+      data: 'data'
+    }
+  }
+};
+const sessionStore = new MySQLStore(sessionOptions);
 const SESSION_SECRET = process.env.SESSION_SECRET || 'default-insecure-secret';
 
 // Security & parsing
@@ -82,11 +103,17 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*', credentials: true }));
 app.use(session({
+  key: 'crda_session',
   secret: SESSION_SECRET,
-  resave: true,
-  saveUninitialized: true,
   store: sessionStore,
-  cookie: { secure: false, httpOnly: true, sameSite: 'lax', maxAge: 86400000 }
+  resave: false,
+  saveUninitialized: false,
+  cookie: { 
+    secure: process.env.NODE_ENV === 'production', 
+    httpOnly: true, 
+    sameSite: 'lax', 
+    maxAge: 86400000 
+  }
 }));
 
 // Middleware to collect HTTP metrics
@@ -113,16 +140,42 @@ async function execWithMetrics(sql, params) {
 // Initialize DB with retries
 async function initDatabase() {
   let retries = 5;
+  
+  // First check if all required env variables are present
+  const requiredEnvVars = ['MYSQL_HOST', 'MYSQL_USER', 'MYSQL_PASSWORD', 'MYSQL_DATABASE'];
+  const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+  
+  if (missingVars.length > 0) {
+    console.error(`❌ Missing required environment variables: ${missingVars.join(', ')}`);
+    console.error('Please check your .env file or environment configuration');
+    process.exit(1);
+  }
+  
   while (retries) {
     try {
       const connection = await pool.getConnection();
       console.log('✅ Successfully connected to database');
+      
+      // Create sessions table if it doesn't exist
+      await connection.query(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          session_id VARCHAR(128) NOT NULL,
+          expires INT(11) UNSIGNED NOT NULL,
+          data MEDIUMTEXT,
+          PRIMARY KEY (session_id)
+        )
+      `);
+      console.log('✅ Session table verified/created');
+      
       connection.release();
       break;
     } catch (err) {
       console.error(`❌ Database connection failed (${retries} retries):`, err.message);
       retries--;
-      if (retries === 0) process.exit(1);
+      if (retries === 0) {
+        console.error('❌ Maximum retries reached. Exiting application.');
+        process.exit(1);
+      }
       await new Promise(res => setTimeout(res, 5000));
     }
   }
