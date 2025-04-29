@@ -63,7 +63,7 @@ const DB_CONFIG = process.env.NODE_ENV === 'test'
       host: process.env.MYSQL_HOST,
       user: process.env.MYSQL_USER,
       password: process.env.MYSQL_PASSWORD,
-      database: process.env.MYSQL_DB,
+      database: process.env.MYSQL_DB2,
       port: process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : 3306,
       waitForConnections: true,
       connectionLimit: 10,
@@ -94,15 +94,15 @@ if (process.env.NODE_ENV === 'test') {
   console.log('⚙️ Using in-memory session store for testing');
   sessionStore = new session.MemoryStore();
 } else {
-  // Check if MYSQL_DB is set for non-test environments
-  if (!process.env.MYSQL_DB) {
-    console.error('❌ MYSQL_DB environment variable is required');
+  // Check if MYSQL_DB2 is set for non-test environments
+  if (!process.env.MYSQL_DB2) {
+    console.error('❌ MYSQL_DB2 environment variable is required');
     console.error('Please set this in your .env file or environment variables');
-    console.error('Example: MYSQL_DB=crda_db');
+    console.error('Example: MYSQL_DB2=crda_db');
     process.exit(1);
   }
-  if (process.env.NODE_ENV === 'test' && !process.env.MYSQL_DB) {
-    process.env.MYSQL_DB = 'test_db';
+  if (process.env.NODE_ENV === 'test' && !process.env.MYSQL_DB2) {
+    process.env.MYSQL_DB2 = 'test_db';
     console.log('⚙️ Setting test database name for test environment');
   }
    // Regular MySQL session store for non-test environments
@@ -111,7 +111,7 @@ if (process.env.NODE_ENV === 'test') {
     port: process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : 3306,
     user: process.env.MYSQL_USER,
     password: process.env.MYSQL_PASSWORD,
-    database: process.env.MYSQL_DB,
+    database: process.env.MYSQL_DB2,
     createDatabaseTable: true,
     schema: {
       tableName: 'sessions',
@@ -188,7 +188,7 @@ async function initDatabase() {
   let retries = 5;
   
   // First check if all required env variables are present
-  const requiredEnvVars = ['MYSQL_HOST', 'MYSQL_USER', 'MYSQL_PASSWORD', 'MYSQL_DB'];
+  const requiredEnvVars = ['MYSQL_HOST', 'MYSQL_USER', 'MYSQL_PASSWORD', 'MYSQL_DB2'];
   const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
   
   if (missingVars.length > 0) {
