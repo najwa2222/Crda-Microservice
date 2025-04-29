@@ -1,59 +1,86 @@
+// CRDA-backend/app.js
+import dotenv from 'dotenv';
 import express from 'express';
-import mysql from 'mysql2/promise';
+import helmet from 'helmet';
+import * as mysql from 'mysql2/promise';
+import bcrypt from 'bcrypt';
 import cors from 'cors';
 import session from 'express-session';
-import bcrypt from 'bcrypt';
-import helmet from 'helmet';
-import methodOverride from 'method-override';
-import dotenv from 'dotenv';
 import MySQLStoreFactory from 'express-mysql-session';
-import { registry } from './utils/metrics.js';
-import { metricsMiddleware } from './utils/metricsMiddleware.js';
+import Prometheus from 'prom-client';
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT;
 
-if (!NODE_ENV) {
-  NODE_ENV = 'development';
-}
+// Prometheus setup
+const register = new Prometheus.Registry();
+Prometheus.collectDefaultMetrics({ register });
 
+// Custom metrics
+const httpCounter = new Prometheus.Counter({
+  name: 'http_requests_total',
+  help: 'Total number of HTTP requests',
+  labelNames: ['method', 'route', 'code'],
+});
+const httpHistogram = new Prometheus.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'HTTP request duration in seconds',
+  labelNames: ['method', 'route', 'code'],
+  buckets: [0.01, 0.05, 0.1, 0.5, 1, 2],
+});
+const dbCounter = new Prometheus.Counter({
+  name: 'db_query_total',
+  help: 'Total number of database queries',
+  labelNames: ['operation'],
+});
+const dbHistogram = new Prometheus.Histogram({
+  name: 'db_query_duration_seconds',
+  help: 'Database query duration in seconds',
+  labelNames: ['operation'],
+  buckets: [0.001, 0.01, 0.1, 1],
+});
+
+// Register custom metrics
+register.registerMetric(httpCounter);
+register.registerMetric(httpHistogram);
+register.registerMetric(dbCounter);
+register.registerMetric(dbHistogram);
+
+// DB Configuration
 const DB_CONFIG = {
   host: process.env.MYSQL_HOST,
   user: process.env.MYSQL_USER,
   password: process.env.MYSQL_PASSWORD,
   database: process.env.MYSQL_DATABASE,
-  port: process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : 3306
+  port: process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : 3306,
+  waitForConnections: true,
+  connectionLimit: 10,
 };
 
+// MySQL connection pool
+const pool = mysql.createPool(DB_CONFIG);
+
+// Session configuration
 const MySQLStore = MySQLStoreFactory(session);
 const sessionStore = new MySQLStore(DB_CONFIG);
 const SESSION_SECRET = process.env.SESSION_SECRET || 'default-insecure-secret';
 
-let connection;
-async function initializeDatabase(retries = 5) {
-  try {
-    connection = await mysql.createConnection(DB_CONFIG);
-    console.log(`Connected to MySQL (${connection.threadId})`);
-  } catch (err) {
-    if (retries > 0) {
-      console.log(`Retrying DB connection… (${6 - retries}/5)`);
-      setTimeout(() => initializeDatabase(retries - 1), 5000);
-    } else {
-      console.error('Could not connect to MySQL:', err.message);
-      process.exit(1);
+// Security & parsing
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      imgSrc: ["'self'"],
     }
   }
-}
-
-// — Middleware —
-app.use(metricsMiddleware);
-app.use(helmet({ contentSecurityPolicy: { useDefaults: true } }));
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*', credentials: true }));
-app.use(methodOverride('_method'));
 app.use(session({
   secret: SESSION_SECRET,
   resave: true,
@@ -61,12 +88,386 @@ app.use(session({
   store: sessionStore,
   cookie: { secure: false, httpOnly: true, sameSite: 'lax', maxAge: 86400000 }
 }));
+
+// Middleware to collect HTTP metrics
 app.use((req, res, next) => {
-  if (!connection) return res.status(503).json({ error: 'DB not ready' });
+  const route = req.route?.path || req.path;
+  const endTimer = httpHistogram.startTimer({ method: req.method, route });
+  res.on('finish', () => {
+    httpCounter.inc({ method: req.method, route, code: res.statusCode });
+    endTimer({ code: res.statusCode });
+  });
   next();
 });
 
-// ========== Health & Metrics ==========
+// DB helper with metrics
+async function execWithMetrics(sql, params) {
+  const operation = sql.trim().split(' ')[0];
+  const endDb = dbHistogram.startTimer({ operation });
+  const result = await pool.query(sql, params);
+  endDb();
+  dbCounter.inc({ operation });
+  return result;
+}
+
+// Initialize DB with retries
+async function initDatabase() {
+  let retries = 5;
+  while (retries) {
+    try {
+      const connection = await pool.getConnection();
+      console.log('✅ Successfully connected to database');
+      connection.release();
+      break;
+    } catch (err) {
+      console.error(`❌ Database connection failed (${retries} retries):`, err.message);
+      retries--;
+      if (retries === 0) process.exit(1);
+      await new Promise(res => setTimeout(res, 5000));
+    }
+  }
+}
+
+// Auth middleware
+function isAuthenticated(req, res, next) {
+  if (req.session.user) return next();
+  res.status(401).json({ error: 'Not authenticated' });
+}
+
+// ========== Authentication ==========
+app.post('/login', async (req, res) => {
+  try {
+    const { email_user, password_user } = req.body;
+    const [rows] = await execWithMetrics(
+      'SELECT * FROM utilisateur WHERE email_user = ?', [email_user]
+    );
+    if (!rows.length) return res.status(401).json({ error: 'Invalid credentials' });
+    const user = rows[0];
+    const match = await bcrypt.compare(password_user, user.password_user);
+    if (!match) return res.status(401).json({ error: 'Invalid credentials' });
+    if (user.status_user !== 'approved') {
+      return res.status(403).json({ error: 'Account not approved' });
+    }
+    req.session.user = {
+      id: user.id,
+      email_user: user.email_user,
+      role_user: user.role_user,
+      nom_user: user.nom_user,
+      prenom_user: user.prenom_user
+    };
+    res.json({ user: req.session.user });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Login error' });
+  }
+});
+
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => res.status(204).end());
+});
+
+app.post('/register', async (req, res) => {
+  try {
+    const { email_user, password_user, role_user, nom_user, prenom_user, sex_user, cin_user } = req.body;
+    if (!email_user.endsWith('@crda.com')) {
+      return res.status(400).json({ error: 'Invalid email domain' });
+    }
+    const [exist] = await execWithMetrics(
+      'SELECT id FROM utilisateur WHERE email_user = ? OR cin_user = ?', [email_user, cin_user]
+    );
+    if (exist.length) return res.status(409).json({ error: 'Already exists' });
+    const hash = await bcrypt.hash(password_user, 10);
+    await execWithMetrics(
+      `INSERT INTO utilisateur
+       (email_user, password_user, role_user, status_user, nom_user, prenom_user, sex_user, cin_user)
+       VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)`,
+      [email_user, hash, role_user, nom_user, prenom_user, sex_user, cin_user]
+    );
+    res.status(201).json({ message: 'Registration pending approval' });
+  } catch (err) {
+    console.error(err);
+    res.status(400).json({ error: 'Registration error' });
+  }
+});
+
+// ========== Services ==========
+app.get('/services', isAuthenticated, async (req, res) => {
+  try {
+    const [rows] = await execWithMetrics(`
+      SELECT s.*, IF(r.id IS NOT NULL,'تم','قيد الانتظار') AS status
+      FROM services_utilisateur s
+      LEFT JOIN rapport r ON s.cin = r.cin AND s.sujet = r.sujet
+    `);
+    res.json({ services: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/services', isAuthenticated, async (req, res) => {
+  try {
+    const {
+      sujet, prenom, nom, cin, numero_transaction,
+      certificat_propriete_terre, copie_piece_identite_fermier,
+      copie_piece_identite_nationale, demande_but,
+      copie_contrat_location_terrain, autres_documents
+    } = req.body;
+    await execWithMetrics(
+      `INSERT INTO services_utilisateur
+       (sujet, prenom, nom, cin, numero_transaction,
+        certificat_propriete_terre, copie_piece_identite_fermier,
+        copie_piece_identite_nationale, demande_but,
+        copie_contrat_location_terrain, autres_documents)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        sujet, prenom, nom, cin, numero_transaction,
+        !!certificat_propriete_terre,
+        !!copie_piece_identite_fermier,
+        !!copie_piece_identite_nationale,
+        !!demande_but,
+        !!copie_contrat_location_terrain,
+        !!autres_documents
+      ]
+    );
+    res.status(201).json({ message: 'Service added' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.put('/services/:id', isAuthenticated, async (req, res) => {
+  try {
+    const {
+      sujet, prenom, nom, cin, numero_transaction,
+      certificat_propriete_terre, copie_piece_identite_fermier,
+      copie_piece_identite_nationale, demande_but,
+      copie_contrat_location_terrain, autres_documents
+    } = req.body;
+    await execWithMetrics(
+      `UPDATE services_utilisateur
+       SET sujet=?, prenom=?, nom=?, cin=?, numero_transaction=?,
+           certificat_propriete_terre=?, copie_piece_identite_fermier=?,
+           copie_piece_identite_nationale=?, demande_but=?,
+           copie_contrat_location_terrain=?, autres_documents=?
+       WHERE id=?`,
+      [
+        sujet, prenom, nom, cin, numero_transaction,
+        !!certificat_propriete_terre,
+        !!copie_piece_identite_fermier,
+        !!copie_piece_identite_nationale,
+        !!demande_but,
+        !!copie_contrat_location_terrain,
+        !!autres_documents,
+        req.params.id
+      ]
+    );
+    res.json({ message: 'Service updated' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/services/:id', isAuthenticated, async (req, res) => {
+  try {
+    await execWithMetrics('DELETE FROM services_utilisateur WHERE id=?', [req.params.id]);
+    res.json({ message: 'Service deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ========== Reports ==========
+app.get('/reports', isAuthenticated, async (req, res) => {
+  try {
+    const [rows] = await execWithMetrics('SELECT * FROM rapport');
+    res.json({ reports: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/reports/:id', isAuthenticated, async (req, res) => {
+  try {
+    const [rows] = await execWithMetrics('SELECT * FROM rapport WHERE id=?', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json({ report: rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/reports', isAuthenticated, async (req, res) => {
+  try {
+    const { cin, sujet, nom, prenom, surface, limites_terrain,
+      localisation, superficie_batiments_anciens, observations } = req.body;
+    if (!cin || !sujet) {
+      return res.status(400).json({ error: 'cin & sujet required' });
+    }
+    const [[service]] = await execWithMetrics(
+      'SELECT numero_transaction FROM services_utilisateur WHERE cin=? AND sujet=?',
+      [cin, sujet]
+    );
+    if (!service) return res.status(404).json({ error: 'Service not found' });
+    
+    await pool.execute('START TRANSACTION');
+    try {
+      await execWithMetrics(
+        `INSERT INTO rapport
+         (cin, sujet, nom, prenom, surface, limites_terrain,
+          localisation, superficie_batiments_anciens, observations, numero_transaction)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [cin, sujet, nom, prenom, surface, limites_terrain,
+          localisation, superficie_batiments_anciens, observations,
+          service.numero_transaction]
+      );
+      await execWithMetrics(
+        'UPDATE services_utilisateur SET status="تم" WHERE cin=? AND sujet=?',
+        [cin, sujet]
+      );
+      await pool.execute('COMMIT');
+      res.status(201).json({ message: 'Report added' });
+    } catch (err) {
+      await pool.execute('ROLLBACK');
+      throw err;
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.put('/reports/:id', isAuthenticated, async (req, res) => {
+  try {
+    const { surface, limites_terrain, localisation,
+      superficie_batiments_anciens, observations } = req.body;
+    await execWithMetrics(
+      `UPDATE rapport
+       SET surface=?, limites_terrain=?, localisation=?,
+           superficie_batiments_anciens=?, observations=?
+       WHERE id=?`,
+      [surface, limites_terrain, localisation,
+        superficie_batiments_anciens, observations,
+        req.params.id]
+    );
+    res.json({ message: 'Report updated' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/reports/:id', isAuthenticated, async (req, res) => {
+  try {
+    const [[r]] = await execWithMetrics('SELECT cin,sujet FROM rapport WHERE id=?', [req.params.id]);
+    if (!r) return res.status(404).json({ error: 'Not found' });
+    
+    await pool.execute('START TRANSACTION');
+    try {
+      await execWithMetrics('DELETE FROM results WHERE cin=? AND sujet=?', [r.cin, r.sujet]);
+      await execWithMetrics('DELETE FROM rapport WHERE id=?', [req.params.id]);
+      await pool.execute('COMMIT');
+      res.json({ message: 'Report deleted' });
+    } catch (err) {
+      await pool.execute('ROLLBACK');
+      throw err;
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ========== Results ==========
+app.get('/results', isAuthenticated, async (req, res) => {
+  try {
+    const [rows] = await execWithMetrics(`
+      SELECT s.*, r.statut, rap.id AS report_id
+      FROM services_utilisateur s
+      LEFT JOIN results r ON s.cin=r.cin AND s.sujet=r.sujet
+      INNER JOIN rapport rap ON s.cin=rap.cin AND s.sujet=rap.sujet
+      ORDER BY s.id DESC
+    `);
+    res.json({ results: rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/results', isAuthenticated, async (req, res) => {
+  try {
+    const { sujet, nom, prenom, cin, numero_transaction, statut } = req.body;
+    const allowed = ['مقبول', 'مرفوض'];
+    if (!allowed.includes(statut)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+    await execWithMetrics(
+      `INSERT INTO results (sujet,nom,prenom,cin,numero_transaction,statut)
+       VALUES (?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE statut=?`,
+      [sujet, nom, prenom, cin, numero_transaction, statut, statut]
+    );
+    res.json({ message: 'Result saved' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/results', isAuthenticated, async (req, res) => {
+  try {
+    const { cin, numero_transaction } = req.body;
+    await execWithMetrics(
+      'DELETE FROM results WHERE cin=? AND numero_transaction=?',
+      [cin, numero_transaction]
+    );
+    res.json({ message: 'Result deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ========== Check-Status ==========
+app.post('/check-status', async (req, res) => {
+  try {
+    const { cin, transaction_number } = req.body;
+    if (!cin || !transaction_number) {
+      return res.status(400).json({ error: 'cin & transaction_number required' });
+    }
+    const [[service]] = await execWithMetrics(
+      'SELECT * FROM services_utilisateur WHERE cin=? AND numero_transaction=?',
+      [cin, transaction_number]
+    );
+    if (!service) {
+      return res.status(404).json({ error: 'No matching service' });
+    }
+    const [[rep]] = await execWithMetrics(
+      'SELECT * FROM rapport WHERE cin=? AND numero_transaction=?',
+      [cin, transaction_number]
+    );
+    const [[resu]] = await execWithMetrics(
+      'SELECT * FROM results WHERE cin=? AND numero_transaction=?',
+      [cin, transaction_number]
+    );
+    let statut;
+    if (resu) statut = resu.statut;
+    else if (rep) statut = 'بصدد الدرس';
+    else statut = 'في انتظار التقرير';
+
+    res.json({ service, statut });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Health checks
 app.get('/health', async (req, res) => {
   try {
@@ -92,6 +493,7 @@ app.get('/health-pod', async (req, res) => {
   }
 });
 
+// Metrics endpoint
 app.get('/metrics', async (req, res) => {
   try {
     res.set('Content-Type', register.contentType);
@@ -102,329 +504,11 @@ app.get('/metrics', async (req, res) => {
   }
 });
 
-// — Auth Helpers —
-const isAuthenticated = (req, res, next) => {
-  if (req.session.user) return next();
-  res.status(401).json({ error: 'Not authenticated' });
-};
-
-// ========== Authentication ==========
-app.post('/login', async (req, res) => {
-  try {
-    const { email_user, password_user } = req.body;
-    const [rows] = await connection.query(
-      'SELECT * FROM utilisateur WHERE email_user = ?', [email_user]
-    );
-    if (!rows.length) return res.status(401).json({ error: 'Invalid credentials' });
-    const user = rows[0];
-    const match = await bcrypt.compare(password_user, user.password_user);
-    if (!match) return res.status(401).json({ error: 'Invalid credentials' });
-    if (user.status_user !== 'approved') {
-      return res.status(403).json({ error: 'Account not approved' });
-    }
-    req.session.user = {
-      id: user.id,
-      email_user: user.email_user,
-      role_user: user.role_user,
-      nom_user: user.nom_user,
-      prenom_user: user.prenom_user
-    };
-    res.json({ user: req.session.user });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/logout', (req, res) => {
-  req.session.destroy(() => res.status(204).end());
-});
-
-app.post('/register', async (req, res) => {
-  try {
-    const { email_user, password_user, role_user, nom_user, prenom_user, sex_user, cin_user } = req.body;
-    if (!email_user.endsWith('@crda.com')) {
-      return res.status(400).json({ error: 'Invalid email domain' });
-    }
-    const [exist] = await connection.query(
-      'SELECT id FROM utilisateur WHERE email_user = ? OR cin_user = ?', [email_user, cin_user]
-    );
-    if (exist.length) return res.status(409).json({ error: 'Already exists' });
-    const hash = await bcrypt.hash(password_user, 10);
-    await connection.query(
-      `INSERT INTO utilisateur
-       (email_user, password_user, role_user, status_user, nom_user, prenom_user, sex_user, cin_user)
-       VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)`,
-      [email_user, hash, role_user, nom_user, prenom_user, sex_user, cin_user]
-    );
-    res.status(201).json({ message: 'Registration pending approval' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== Services ==========
-app.get('/services', isAuthenticated, async (req, res) => {
-  try {
-    const [rows] = await connection.query(`
-      SELECT s.*, IF(r.id IS NOT NULL,'تم','قيد الانتظار') AS status
-      FROM services_utilisateur s
-      LEFT JOIN rapport r ON s.cin = r.cin AND s.sujet = r.sujet
-    `);
-    res.json({ services: rows });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/services', isAuthenticated, async (req, res) => {
-  try {
-    const {
-      sujet, prenom, nom, cin, numero_transaction,
-      certificat_propriete_terre, copie_piece_identite_fermier,
-      copie_piece_identite_nationale, demande_but,
-      copie_contrat_location_terrain, autres_documents
-    } = req.body;
-    await connection.query(
-      `INSERT INTO services_utilisateur
-       (sujet, prenom, nom, cin, numero_transaction,
-        certificat_propriete_terre, copie_piece_identite_fermier,
-        copie_piece_identite_nationale, demande_but,
-        copie_contrat_location_terrain, autres_documents)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        sujet, prenom, nom, cin, numero_transaction,
-        !!certificat_propriete_terre,
-        !!copie_piece_identite_fermier,
-        !!copie_piece_identite_nationale,
-        !!demande_but,
-        !!copie_contrat_location_terrain,
-        !!autres_documents
-      ]
-    );
-    res.status(201).json({ message: 'Service added' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/services/:id', isAuthenticated, async (req, res) => {
-  try {
-    const {
-      sujet, prenom, nom, cin, numero_transaction,
-      certificat_propriete_terre, copie_piece_identite_fermier,
-      copie_piece_identite_nationale, demande_but,
-      copie_contrat_location_terrain, autres_documents
-    } = req.body;
-    await connection.query(
-      `UPDATE services_utilisateur
-       SET sujet=?, prenom=?, nom=?, cin=?, numero_transaction=?,
-           certificat_propriete_terre=?, copie_piece_identite_fermier=?,
-           copie_piece_identite_nationale=?, demande_but=?,
-           copie_contrat_location_terrain=?, autres_documents=?
-       WHERE id=?`,
-      [
-        sujet, prenom, nom, cin, numero_transaction,
-        !!certificat_propriete_terre,
-        !!copie_piece_identite_fermier,
-        !!copie_piece_identite_nationale,
-        !!demande_but,
-        !!copie_contrat_location_terrain,
-        !!autres_documents,
-        req.params.id
-      ]
-    );
-    res.json({ message: 'Service updated' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/services/:id', isAuthenticated, async (req, res) => {
-  try {
-    await connection.query('DELETE FROM services_utilisateur WHERE id=?', [req.params.id]);
-    res.json({ message: 'Service deleted' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== Reports ==========
-app.get('/reports', isAuthenticated, async (req, res) => {
-  try {
-    const [rows] = await connection.query('SELECT * FROM rapport');
-    res.json({ reports: rows });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/reports/:id', isAuthenticated, async (req, res) => {
-  try {
-    const [rows] = await connection.query('SELECT * FROM rapport WHERE id=?', [req.params.id]);
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    res.json({ report: rows[0] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/reports', isAuthenticated, async (req, res) => {
-  try {
-    const { cin, sujet, nom, prenom, surface, limites_terrain,
-      localisation, superficie_batiments_anciens, observations } = req.body;
-    if (!cin || !sujet) {
-      return res.status(400).json({ error: 'cin & sujet required' });
-    }
-    const [[service]] = await connection.query(
-      'SELECT numero_transaction FROM services_utilisateur WHERE cin=? AND sujet=?',
-      [cin, sujet]
-    );
-    if (!service) return res.status(404).json({ error: 'Service not found' });
-    await connection.beginTransaction();
-    await connection.query(
-      `INSERT INTO rapport
-       (cin, sujet, nom, prenom, surface, limites_terrain,
-        localisation, superficie_batiments_anciens, observations, numero_transaction)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [cin, sujet, nom, prenom, surface, limites_terrain,
-        localisation, superficie_batiments_anciens, observations,
-        service.numero_transaction]
-    );
-    await connection.query(
-      'UPDATE services_utilisateur SET status="تم" WHERE cin=? AND sujet=?',
-      [cin, sujet]
-    );
-    await connection.commit();
-    res.status(201).json({ message: 'Report added' });
-  } catch (err) {
-    await connection.rollback();
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/reports/:id', isAuthenticated, async (req, res) => {
-  try {
-    const { surface, limites_terrain, localisation,
-      superficie_batiments_anciens, observations } = req.body;
-    await connection.query(
-      `UPDATE rapport
-       SET surface=?, limites_terrain=?, localisation=?,
-           superficie_batiments_anciens=?, observations=?
-       WHERE id=?`,
-      [surface, limites_terrain, localisation,
-        superficie_batiments_anciens, observations,
-        req.params.id]
-    );
-    res.json({ message: 'Report updated' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/reports/:id', isAuthenticated, async (req, res) => {
-  try {
-    const [[r]] = await connection.query('SELECT cin,sujet FROM rapport WHERE id=?', [req.params.id]);
-    if (!r) return res.status(404).json({ error: 'Not found' });
-    await connection.beginTransaction();
-    await connection.query('DELETE FROM results WHERE cin=? AND sujet=?', [r.cin, r.sujet]);
-    await connection.query('DELETE FROM rapport WHERE id=?', [req.params.id]);
-    await connection.commit();
-    res.json({ message: 'Report deleted' });
-  } catch (err) {
-    await connection.rollback();
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== Results ==========
-app.get('/results', isAuthenticated, async (req, res) => {
-  try {
-    const [rows] = await connection.query(`
-      SELECT s.*, r.statut, rap.id AS report_id
-      FROM services_utilisateur s
-      LEFT JOIN results r ON s.cin=r.cin AND s.sujet=r.sujet
-      INNER JOIN rapport rap ON s.cin=rap.cin AND s.sujet=rap.sujet
-      ORDER BY s.id DESC
-    `);
-    res.json({ results: rows });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/results', isAuthenticated, async (req, res) => {
-  try {
-    const { sujet, nom, prenom, cin, numero_transaction, statut } = req.body;
-    const allowed = ['مقبول', 'مرفوض'];
-    if (!allowed.includes(statut)) {
-      return res.status(400).json({ error: 'Invalid status' });
-    }
-    await connection.query(
-      `INSERT INTO results (sujet,nom,prenom,cin,numero_transaction,statut)
-       VALUES (?,?,?,?,?,?)
-       ON DUPLICATE KEY UPDATE statut=?`,
-      [sujet, nom, prenom, cin, numero_transaction, statut, statut]
-    );
-    res.json({ message: 'Result saved' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/results', isAuthenticated, async (req, res) => {
-  try {
-    const { cin, numero_transaction } = req.body;
-    await connection.query(
-      'DELETE FROM results WHERE cin=? AND numero_transaction=?',
-      [cin, numero_transaction]
-    );
-    res.json({ message: 'Result deleted' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== Check-Status ==========
-app.post('/check-status', async (req, res) => {
-  try {
-    const { cin, transaction_number } = req.body;
-    if (!cin || !transaction_number) {
-      return res.status(400).json({ error: 'cin & transaction_number required' });
-    }
-    const [[service]] = await connection.query(
-      'SELECT * FROM services_utilisateur WHERE cin=? AND numero_transaction=?',
-      [cin, transaction_number]
-    );
-    if (!service) {
-      return res.status(404).json({ error: 'No matching service' });
-    }
-    const [[rep]] = await connection.query(
-      'SELECT * FROM rapport WHERE cin=? AND numero_transaction=?',
-      [cin, transaction_number]
-    );
-    const [[resu]] = await connection.query(
-      'SELECT * FROM results WHERE cin=? AND numero_transaction=?',
-      [cin, transaction_number]
-    );
-    let statut;
-    if (resu) statut = resu.statut;
-    else if (rep) statut = 'بصدد الدرس';
-    else statut = 'في انتظار التقرير';
-
-    res.json({ service, statut });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// — Global Error & Start —
-app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(err.status || 500).json({ error: 'Unexpected error' });
-});
-
-initializeDatabase().then(() => {
-  app.listen(PORT, () => {
-    console.log(`CRDA‐backend API listening on port ${PORT}`);
+// Start server
+initDatabase().then(() => {
+  app.listen(process.env.PORT || 3000, () => {
+    console.log(`🚀 CRDA app started on port ${process.env.PORT || 3000}`);
   });
 });
+
+export default app;
