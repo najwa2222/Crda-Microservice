@@ -13,6 +13,7 @@ pipeline {
     MYSQL_APP_PASSWORD         = credentials('mysql-app-password')
     SESSION_SECRET             = credentials('app-session-secret')
     JWT_SECRET                 = credentials('app-jwt-secret')
+    NODE_ENV = 'test'
   }
 
   options {

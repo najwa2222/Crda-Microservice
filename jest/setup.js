@@ -9,9 +9,12 @@ beforeAll(() => {
     NODE_ENV: 'test',
     MYSQL_HOST: 'localhost',
     MYSQL_USER: 'test',
-    MYSQL_PASSWORD: 'test',
+    MYSQL_PASSWORD: 'test_password',
     MYSQL_DATABASE: 'test_db',
-    SESSION_SECRET: 'test-secret'
+    SESSION_SECRET: 'test-secret',
+    MYSQL_PORT: '3306',
+    PORT: '3001',
+    CORS_ORIGIN: "*"
   });
 });
 

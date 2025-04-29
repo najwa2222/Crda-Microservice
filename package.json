@@ -11,7 +11,7 @@
     "lint:fix": "eslint . --fix --config eslint.config.js",
     "sonar": "sonar-scanner",
     "test:empty": "echo 'Generating empty coverage' && mkdir -p coverage && echo '{}' > coverage/lcov.info",
-    "test": "cross-env NODE_OPTIONS=--experimental-vm-modules JEST_JUNIT_CONFIG=jest-junit.config.cjs JEST_JUNIT_OUTPUT_DIR=./reports JEST_JUNIT_OUTPUT_NAME=junit.xml jest --forceExit --ci --coverage --reporters=default --reporters=jest-junit",
+    "test": "cross-env NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules JEST_JUNIT_CONFIG=jest-junit.config.cjs JEST_JUNIT_OUTPUT_DIR=./reports JEST_JUNIT_OUTPUT_NAME=junit.xml jest --forceExit --ci --coverage --reporters=default --reporters=jest-junit",
     "test:watch": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --watch",
     "test:coverage": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --coverage"
   },

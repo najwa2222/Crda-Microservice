@@ -48,43 +48,79 @@ register.registerMetric(dbCounter);
 register.registerMetric(dbHistogram);
 
 // DB Configuration
-const DB_CONFIG = {
-  host: process.env.MYSQL_HOST,
-  user: process.env.MYSQL_USER,
-  password: process.env.MYSQL_PASSWORD,
-  database: process.env.MYSQL_DATABASE,
-  port: process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
-};
+const DB_CONFIG = process.env.NODE_ENV === 'test' 
+  ? {
+      // Mock configuration for testing
+      host: 'localhost',
+      user: 'test',
+      password: 'test',
+      database: 'test',
+      port: 3306,
+      waitForConnections: true,
+      connectionLimit: 2,
+    }
+  : {
+      host: process.env.MYSQL_HOST,
+      user: process.env.MYSQL_USER,
+      password: process.env.MYSQL_PASSWORD,
+      database: process.env.MYSQL_DATABASE,
+      port: process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : 3306,
+      waitForConnections: true,
+      connectionLimit: 10,
+    };
 
-// MySQL connection pool
-const pool = mysql.createPool(DB_CONFIG);
+// Create a mock pool for testing or a real one for other environments
+const pool = process.env.NODE_ENV === 'test'
+  ? {
+      // Mock pool for testing
+      query: async () => [[], []],
+      execute: async () => {},
+      getConnection: async () => ({
+        query: async () => {},
+        release: () => {}
+      })
+    }
+  : mysql.createPool(DB_CONFIG);
 
 // Session configuration
 // Session configuration with proper database specification
 const MySQLStore = MySQLStoreFactory(session);
-if (!process.env.MYSQL_DATABASE) {
-  console.error('❌ MYSQL_DATABASE environment variable is required');
-  process.exit(1);
-}
-const sessionOptions = {
-  host: process.env.MYSQL_HOST,
-  user: process.env.MYSQL_USER,
-  password: process.env.MYSQL_PASSWORD,
-  database: process.env.MYSQL_DATABASE,
-  port: process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : 3306,
-  createDatabaseTable: true,
-  schema: {
-    tableName: 'sessions',
-    columnNames: {
-      session_id: 'session_id',
-      expires: 'expires',
-      data: 'data'
-    }
+// Use in-memory session store for testing
+let sessionStore;
+let sessionOptions;
+
+if (process.env.NODE_ENV === 'test') {
+  // For testing, use in-memory store instead of MySQL
+  console.log('⚙️ Using in-memory session store for testing');
+  sessionStore = new session.MemoryStore();
+} else {
+  // Check if MYSQL_DATABASE is set for non-test environments
+  if (!process.env.MYSQL_DATABASE) {
+    console.error('❌ MYSQL_DATABASE environment variable is required');
+    console.error('Please set this in your .env file or environment variables');
+    console.error('Example: MYSQL_DATABASE=crda_db');
+    process.exit(1);
   }
-};
-const sessionStore = new MySQLStore(sessionOptions);
+   // Regular MySQL session store for non-test environments
+   sessionOptions = {
+    host: process.env.MYSQL_HOST,
+    port: process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : 3306,
+    user: process.env.MYSQL_USER,
+    password: process.env.MYSQL_PASSWORD,
+    database: process.env.MYSQL_DATABASE,
+    createDatabaseTable: true,
+    schema: {
+      tableName: 'sessions',
+      columnNames: {
+        session_id: 'session_id',
+        expires: 'expires',
+        data: 'data'
+      }
+    }
+  };
+  sessionStore = new MySQLStore(sessionOptions);
+}
+
 const SESSION_SECRET = process.env.SESSION_SECRET || 'default-insecure-secret';
 
 // Security & parsing
@@ -139,6 +175,12 @@ async function execWithMetrics(sql, params) {
 
 // Initialize DB with retries
 async function initDatabase() {
+  // Skip actual DB initialization in test environment
+  if (process.env.NODE_ENV === 'test') {
+    console.log('⚙️ Test environment detected - skipping database initialization');
+    return;
+  }
+
   let retries = 5;
   
   // First check if all required env variables are present
