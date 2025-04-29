@@ -202,16 +202,35 @@ async function initDatabase() {
       const connection = await pool.getConnection();
       console.log('✅ Successfully connected to database');
       
-      // Create sessions table if it doesn't exist
-      await connection.query(`
-        CREATE TABLE IF NOT EXISTS sessions (
-          session_id VARCHAR(128) NOT NULL,
-          expires INT(11) UNSIGNED NOT NULL,
-          data MEDIUMTEXT,
-          PRIMARY KEY (session_id)
-        )
-      `);
-      console.log('✅ Session table verified/created');
+      // Try to use existing sessions table instead of creating it
+      try {
+        // First check if the sessions table exists
+        const [tableExists] = await connection.query(
+          `SELECT COUNT(*) as count FROM information_schema.tables 
+           WHERE table_schema = ? AND table_name = ?`, 
+          [process.env.MYSQL_DB, 'sessions']
+        );
+        
+        if (tableExists[0].count === 0) {
+          console.log('ℹ️ Sessions table does not exist, attempting to create it');
+          // Only try to create the table if it doesn't exist
+          await connection.query(`
+            CREATE TABLE IF NOT EXISTS sessions (
+              session_id VARCHAR(128) NOT NULL,
+              expires INT(11) UNSIGNED NOT NULL,
+              data MEDIUMTEXT,
+              PRIMARY KEY (session_id)
+            )
+          `);
+          console.log('✅ Session table created successfully');
+        } else {
+          console.log('✅ Session table already exists');
+        }
+      } catch (tableErr) {
+        // If we can't create the table, log the error but continue
+        console.warn('⚠️ Unable to create sessions table:', tableErr.message);
+        console.warn('The application may still work if the sessions table already exists');
+      }
       
       connection.release();
       break;
