@@ -131,7 +131,7 @@ pipeline {
     success {
       slackSend(
         color: 'good',
-        message: "CRDA Backend build & deploy succeeded: ${env.BUILD_URL}",
+        message: "CRDA Back-end build & deploy succeeded: ${env.BUILD_URL}",
         channel: '#jenkins-builds',
         tokenCredentialId: 'slack-token'
       )
@@ -139,7 +139,7 @@ pipeline {
     failure {
       slackSend(
         color: 'danger',
-        message: "CRDA Backend build or deploy failed: ${env.BUILD_URL}",
+        message: "CRDA Back-end build or deploy failed: ${env.BUILD_URL}",
         channel: '#jenkins-builds',
         tokenCredentialId: 'slack-token'
       )
